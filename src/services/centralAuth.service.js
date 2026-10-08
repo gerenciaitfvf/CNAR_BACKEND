@@ -23,7 +23,7 @@ async function findHubUserByEmail(email) {
   const [rows] = await pool.query(
     `SELECT u.nombre AS userName, u.apellido AS userLastName,
             u.email AS userEmail, a.name AS appName, r.nombre AS roleName,
-            su.nombre AS statusName, u.id AS userId
+            su.nombre AS statusName, u.id AS userId, u.password AS password
        FROM fvf_hub.usuario_app_rol uar
        JOIN fvf_hub.usuarios u ON uar.usuario_id = u.id
        JOIN fvf_hub.apps a ON uar.app_id = a.id

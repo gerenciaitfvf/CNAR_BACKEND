@@ -263,6 +263,33 @@ exports.login = async (req, res, next) => {
     }
 
     if (centralStatus === 404 || authBackUnreachable) {
+      // Hub directo primero: misma cuenta/clave que el resto de las apps.
+      try {
+        const hubUser = await findHubUserByEmail(email);
+        if (hubUser && hubUser.password) {
+          const hubOk = await bcrypt.compare(password, hubUser.password);
+          if (hubOk) {
+            const local = await provisionLocalUser(hubUser);
+            if (local.is_active) {
+              await logAudit({
+                user: local,
+                action:      'auth.login',
+                entity_type: 'auth',
+                method:      'POST',
+                path:        '/api/auth/login',
+                status_code: 200,
+                ip:          req.ip,
+                user_agent:  req.headers['user-agent'] || null,
+                metadata:    { email: local.email, source: 'hub_direct' },
+              });
+              return sendLogin(req, res, local);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Error en auth hub directo:', err.message);
+      }
+
       const user = await findLocalUserByEmail(email);
 
       if (!user) {
