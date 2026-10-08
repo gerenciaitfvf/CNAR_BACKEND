@@ -2,7 +2,8 @@ const bcrypt = require('bcrypt');
 const pool   = require('../config/db');
 const { sign } = require('../utils/jwt.util');
 const { logAudit } = require('../utils/audit');
-const { loginCentral } = require('../services/centralAuth.service');
+const { loginCentral, findHubUserByEmail } = require('../services/centralAuth.service');
+const { verifyGoogleIdToken } = require('../services/googleToken.service');
 
 const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
 
@@ -216,11 +217,47 @@ exports.login = async (req, res, next) => {
       return sendLogin(req, res, user);
     }
 
+    // Google: verifica el idToken con certs públicos de Google y busca al
+    // usuario en el hub (no depende de AUTH_URL/AUTH_TOKEN ni de firebase-admin).
+    if (idToken) {
+      let googleEmail;
+      try {
+        googleEmail = await verifyGoogleIdToken(idToken);
+      } catch (err) {
+        return res.status(401).json({ ok: false, message: 'Credenciales inválidas' });
+      }
+
+      const hubUser = await findHubUserByEmail(googleEmail);
+      if (!hubUser) {
+        return res.status(404).json({ ok: false, message: 'Usuario no autorizado para CNAR' });
+      }
+
+      const user = await provisionLocalUser(hubUser);
+
+      if (!user.is_active) {
+        return res.status(403).json({ ok: false, message: 'Usuario inactivo' });
+      }
+
+      await logAudit({
+        user,
+        action:      'auth.login',
+        entity_type: 'auth',
+        method:      'POST',
+        path:        '/api/auth/login',
+        status_code: 200,
+        ip:          req.ip,
+        user_agent:  req.headers['user-agent'] || null,
+        metadata:    { email: user.email, source: 'google_hub' },
+      });
+
+      return sendLogin(req, res, user);
+    }
+
     // Fallback local solo para login con password (no Google)
     const centralStatus = centralError?.response?.status;
     const authBackUnreachable = !centralError?.response;
 
-    if (idToken || (centralStatus && centralStatus !== 404)) {
+    if (centralStatus && centralStatus !== 404) {
       const status = centralStatus === 403 ? 403 : 401;
       return res.status(status).json({ ok: false, message: 'Credenciales inválidas' });
     }
