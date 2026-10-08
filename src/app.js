@@ -26,6 +26,7 @@ const DEFAULT_CORS_ORIGINS = [
   'http://13.140.141.86:4000',
   'http://13.140.141.86:5173',
   'http://13.140.141.86:8080',
+  'https://cnar.fvf.com.ve',
 ];
 
 const allowedOrigins = (process.env.CORS_ORIGINS
@@ -46,6 +47,8 @@ const corsOptions = {
   origin(origin, callback) {
     // Permitir peticiones sin origin (curl, Postman, server-to-server, health checks)
     if (!origin) return callback(null, true);
+    // Autorizar todos los subdominios corporativos fvf.com.ve
+    if (/\.fvf\.com\.ve$/i.test(origin)) return callback(null, true);
     if (normalizedOrigins.includes(origin) || normalizedOrigins.includes(origin.replace(/\/+$/, ''))) {
       return callback(null, true);
     }
