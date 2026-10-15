@@ -29,11 +29,12 @@ async function findHubUserByEmail(email) {
        JOIN fvf_hub.apps a ON uar.app_id = a.id
        JOIN fvf_hub.roles r ON uar.rol_id = r.id
        JOIN fvf_hub.status_usuarios su ON u.status_id = su.id
-      WHERE u.email = ? AND a.name LIKE ? AND su.nombre = 'ACTIVO'
-      LIMIT 1`,
-    [(email || '').trim().toLowerCase(), `%${appName}%`]
+      WHERE u.email = ? AND su.nombre = 'ACTIVO'`,
+    [String(email || '').trim().toLowerCase()]
   );
-  return rows[0] || null;
+  // Coincidencia exacta del sistema (antes LIKE '%app%' aceptaba cualquier app parecida)
+  const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return rows.find((r) => norm(r.appName) === norm(appName)) || null;
 }
 
 module.exports = { loginCentral, findHubUserByEmail, APP_NAME };
