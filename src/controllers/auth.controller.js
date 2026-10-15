@@ -40,8 +40,9 @@ async function resolveRoleId(roleName) {
   }
   if (process.env.CNAR_DEFAULT_ROLE_ID) return Number(process.env.CNAR_DEFAULT_ROLE_ID);
 
-  const [fallback] = await pool.query('SELECT id FROM roles ORDER BY id LIMIT 1');
-  return fallback.length ? fallback[0].id : null;
+  // Rol del hub no reconocido: se deniega (antes se tomaba el primer rol de la
+  // tabla, que podía ser superadmin).
+  return null;
 }
 
 async function findLocalUserByEmail(email) {
@@ -58,14 +59,21 @@ async function findLocalUserByEmail(email) {
 
 // Alta/actualización "just-in-time" del usuario del hub en la BD local.
 async function provisionLocalUser(centralUser) {
-  const existing = await findLocalUserByEmail(centralUser.userEmail);
-  if (existing) return existing;
-
+  // Usuarios y roles viven en el hub: el rol de CNAR-FVF del hub es el que vale.
   const roleId = await resolveRoleId(centralUser.roleName);
   if (!roleId) {
-    const err = new Error('No hay roles configurados en el sistema');
-    err.status = 500;
+    const err = new Error(`Rol "${centralUser.roleName}" no habilitado en CNAR`);
+    err.status = 403;
     throw err;
+  }
+
+  const existing = await findLocalUserByEmail(centralUser.userEmail);
+  if (existing) {
+    if (existing.role_id !== roleId) {
+      await pool.query('UPDATE users SET role_id = ? WHERE id = ?', [roleId, existing.id]);
+      return findLocalUserByEmail(centralUser.userEmail);
+    }
+    return existing;
   }
 
   const fullName =
@@ -175,8 +183,8 @@ exports.register = async (req, res, next) => {
  *  1) Intenta autenticar contra el hub central (email/password o
  *     idToken de Google). Si el usuario existe en el hub, se da de
  *     alta/actualiza localmente y se emite JWT local.
- *  2) Si el hub no lo conoce (404) y vino con password, cae al login
- *     local con bcrypt (compatibilidad durante la migración).
+ *  2) Si auth-back no responde, valida contra la BD del hub directamente.
+ *  Ya no hay login con contraseñas locales: usuarios y roles están en el hub.
  * ---------------------------------------------------------- */
 exports.login = async (req, res, next) => {
   try {
@@ -253,7 +261,7 @@ exports.login = async (req, res, next) => {
       return sendLogin(req, res, user);
     }
 
-    // Fallback local solo para login con password (no Google)
+    // Sin respuesta del hub (auth-back caído o 404): validación directa en la BD del hub
     const centralStatus = centralError?.response?.status;
     const authBackUnreachable = !centralError?.response;
 
@@ -290,67 +298,16 @@ exports.login = async (req, res, next) => {
         console.error('Error en auth hub directo:', err.message);
       }
 
-      const user = await findLocalUserByEmail(email);
-
-      if (!user) {
-        await logAudit({
-          action:      'auth.login.fail',
-          entity_type: 'auth',
-          method:      'POST',
-          path:        '/api/auth/login',
-          status_code: 401,
-          ip:          req.ip,
-          user_agent:  req.headers['user-agent'] || null,
-          metadata:    { email, reason: 'user_not_found' },
-        });
-        return res.status(401).json({ ok: false, message: 'Credenciales inválidas' });
-      }
-
-      if (!user.is_active) {
-        await logAudit({
-          user,
-          action:      'auth.login.fail',
-          entity_type: 'auth',
-          method:      'POST',
-          path:        '/api/auth/login',
-          status_code: 403,
-          ip:          req.ip,
-          user_agent:  req.headers['user-agent'] || null,
-          metadata:    { email, reason: 'inactive' },
-        });
-        return res.status(403).json({ ok: false, message: 'Usuario inactivo' });
-      }
-
-      // bcrypt.compare -> compara texto plano contra el hash
-      const ok = await bcrypt.compare(password, user.password_hash);
-      if (!ok) {
-        await logAudit({
-          user,
-          action:      'auth.login.fail',
-          entity_type: 'auth',
-          method:      'POST',
-          path:        '/api/auth/login',
-          status_code: 401,
-          ip:          req.ip,
-          user_agent:  req.headers['user-agent'] || null,
-          metadata:    { email, reason: 'bad_password' },
-        });
-        return res.status(401).json({ ok: false, message: 'Credenciales inválidas' });
-      }
-
       await logAudit({
-        user,
-        action:      'auth.login',
+        action:      'auth.login.fail',
         entity_type: 'auth',
         method:      'POST',
         path:        '/api/auth/login',
-        status_code: 200,
+        status_code: 401,
         ip:          req.ip,
         user_agent:  req.headers['user-agent'] || null,
-        metadata:    { email, source: 'local' },
+        metadata:    { email, reason: 'not_in_hub' },
       });
-
-      return sendLogin(req, res, user);
     }
 
     return res.status(401).json({ ok: false, message: 'Credenciales inválidas' });
