@@ -3,7 +3,6 @@ const pool   = require('../config/db');
 const { sign } = require('../utils/jwt.util');
 const { logAudit } = require('../utils/audit');
 const { loginCentral, findHubUserByEmail } = require('../services/centralAuth.service');
-const { verifyGoogleIdToken } = require('../services/googleToken.service');
 
 const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
 
@@ -180,17 +179,17 @@ exports.register = async (req, res, next) => {
 
 /* ------------------------------------------------------------
  *  POST /api/auth/login
- *  1) Intenta autenticar contra el hub central (email/password o
- *     idToken de Google). Si el usuario existe en el hub, se da de
- *     alta/actualiza localmente y se emite JWT local.
+ *  1) Autentica correo y contraseña contra el hub central. Si el
+ *     usuario existe en el hub, se da de alta/actualiza localmente y
+ *     se emite JWT local.
  *  2) Si auth-back no responde, valida contra la BD del hub directamente.
  *  Ya no hay login con contraseñas locales: usuarios y roles están en el hub.
  * ---------------------------------------------------------- */
 exports.login = async (req, res, next) => {
   try {
-    const { email, password, idToken } = req.body;
+    const { email, password } = req.body;
 
-    if (!idToken && (!email || !password)) {
+    if (!email || !password) {
       return res.status(400).json({ ok: false, message: 'Email y password requeridos' });
     }
 
@@ -198,7 +197,7 @@ exports.login = async (req, res, next) => {
     let centralError = null;
 
     try {
-      centralUser = await loginCentral({ email, password, idToken });
+      centralUser = await loginCentral({ email, password });
     } catch (err) {
       centralError = err;
     }
@@ -220,42 +219,6 @@ exports.login = async (req, res, next) => {
         ip:          req.ip,
         user_agent:  req.headers['user-agent'] || null,
         metadata:    { email: user.email, source: 'central' },
-      });
-
-      return sendLogin(req, res, user);
-    }
-
-    // Google: verifica el idToken con certs públicos de Google y busca al
-    // usuario en el hub (no depende de AUTH_URL/AUTH_TOKEN ni de firebase-admin).
-    if (idToken) {
-      let googleEmail;
-      try {
-        googleEmail = await verifyGoogleIdToken(idToken);
-      } catch (err) {
-        return res.status(401).json({ ok: false, message: 'Credenciales inválidas' });
-      }
-
-      const hubUser = await findHubUserByEmail(googleEmail);
-      if (!hubUser) {
-        return res.status(404).json({ ok: false, message: 'Usuario no autorizado para CNAR' });
-      }
-
-      const user = await provisionLocalUser(hubUser);
-
-      if (!user.is_active) {
-        return res.status(403).json({ ok: false, message: 'Usuario inactivo' });
-      }
-
-      await logAudit({
-        user,
-        action:      'auth.login',
-        entity_type: 'auth',
-        method:      'POST',
-        path:        '/api/auth/login',
-        status_code: 200,
-        ip:          req.ip,
-        user_agent:  req.headers['user-agent'] || null,
-        metadata:    { email: user.email, source: 'google_hub' },
       });
 
       return sendLogin(req, res, user);
