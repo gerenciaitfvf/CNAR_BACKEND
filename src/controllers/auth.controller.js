@@ -3,46 +3,9 @@ const pool   = require('../config/db');
 const { sign } = require('../utils/jwt.util');
 const { logAudit } = require('../utils/audit');
 const { loginCentral, findHubUserByEmail } = require('../services/centralAuth.service');
+const { staffKindFromRole, resolveRoleId } = require('../services/hubRoles');
 
 const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
-
-const ROLE_SLUG_BY_NAME = {
-  superadmin: 'superadmin',
-  'coordinador de recepcion': 'coord-reception',
-  recepcionista: 'receptionist',
-  'coordinador de mantenimiento': 'coord-maintenance',
-  camarera: 'cleaning-staff',
-};
-
-function staffKindFromRole(roleName) {
-  const n = (roleName || '').toLowerCase();
-  if (n.includes('limp') || n.includes('clean') || n.includes('camarera')) return 'CLEANING';
-  if (n.includes('manten') || n.includes('mainten')) return 'MAINTENANCE';
-  if (n.includes('recep')) return 'RECEPTION';
-  return 'SYSTEM';
-}
-
-async function resolveRoleId(roleName) {
-  const norm = (roleName || '').trim().toLowerCase();
-  const slug = ROLE_SLUG_BY_NAME[norm];
-
-  if (slug) {
-    const [bySlug] = await pool.query('SELECT id FROM roles WHERE slug = ? LIMIT 1', [slug]);
-    if (bySlug.length) return bySlug[0].id;
-  }
-  if (norm) {
-    const [byName] = await pool.query(
-      'SELECT id FROM roles WHERE LOWER(name) = ? OR slug = ? LIMIT 1',
-      [norm, norm]
-    );
-    if (byName.length) return byName[0].id;
-  }
-  if (process.env.CNAR_DEFAULT_ROLE_ID) return Number(process.env.CNAR_DEFAULT_ROLE_ID);
-
-  // Rol del hub no reconocido: se deniega (antes se tomaba el primer rol de la
-  // tabla, que podía ser superadmin).
-  return null;
-}
 
 async function findLocalUserByEmail(email) {
   const [rows] = await pool.query(
@@ -61,7 +24,11 @@ async function provisionLocalUser(centralUser) {
   // Usuarios y roles viven en el hub: el rol de CNAR-FVF del hub es el que vale.
   const roleId = await resolveRoleId(centralUser.roleName);
   if (!roleId) {
-    const err = new Error(`Rol "${centralUser.roleName}" no habilitado en CNAR`);
+    console.warn(
+      `Rol del hub "${centralUser.roleName}" sin equivalente en CNAR (${centralUser.userEmail}). ` +
+      'Roles válidos: Superadmin, Coordinador de Recepcion, Recepcionista, Coordinador de Mantenimiento, Camarera'
+    );
+    const err = new Error(`Tu rol "${centralUser.roleName}" no está habilitado en CNAR. Pide al administrador un rol válido de CNAR.`);
     err.status = 403;
     throw err;
   }
@@ -200,6 +167,10 @@ exports.login = async (req, res, next) => {
       centralUser = await loginCentral({ email, password });
     } catch (err) {
       centralError = err;
+      // 403 = AUTH_TOKEN inválido; sin status = AUTH_URL inalcanzable; 429 = demasiados intentos
+      console.warn(
+        `login-app en auth-back falló para ${email}: ${err.response?.status ?? 'sin respuesta'} ${err.response?.data?.error ?? err.message}`
+      );
     }
 
     if (centralUser) {
@@ -228,6 +199,9 @@ exports.login = async (req, res, next) => {
     const centralStatus = centralError?.response?.status;
     const authBackUnreachable = !centralError?.response;
 
+    if (centralStatus === 429) {
+      return res.status(429).json({ ok: false, message: 'Demasiados intentos fallidos. Intenta de nuevo en 15 minutos.' });
+    }
     if (centralStatus && centralStatus !== 404) {
       const status = centralStatus === 403 ? 403 : 401;
       return res.status(status).json({ ok: false, message: 'Credenciales inválidas' });
@@ -259,6 +233,10 @@ exports.login = async (req, res, next) => {
         }
       } catch (err) {
         console.error('Error en auth hub directo:', err.message);
+        // Rol del hub sin equivalente en CNAR: se informa en vez de "credenciales inválidas"
+        if (err.status === 403) {
+          return res.status(403).json({ ok: false, message: err.message });
+        }
       }
 
       await logAudit({
