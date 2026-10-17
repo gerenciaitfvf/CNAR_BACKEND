@@ -2,7 +2,7 @@ const bcrypt = require('bcrypt');
 const pool   = require('../config/db');
 const { sign } = require('../utils/jwt.util');
 const { logAudit } = require('../utils/audit');
-const { loginCentral, findHubUserByEmail } = require('../services/centralAuth.service');
+const { loginCentral, findHubUserByEmail, findHubAccountByEmail } = require('../services/centralAuth.service');
 const { staffKindFromRole, resolveRoleId } = require('../services/hubRoles');
 
 const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
@@ -202,9 +202,16 @@ exports.login = async (req, res, next) => {
     if (centralStatus === 429) {
       return res.status(429).json({ ok: false, message: 'Demasiados intentos fallidos. Intenta de nuevo en 15 minutos.' });
     }
+    if (centralStatus === 403) {
+      const data = centralError?.response?.data || {};
+      return res.status(403).json({
+        ok: false,
+        error: data.error || 'ACCESS_DENIED',
+        message: data.message || 'No tienes permisos asignados para acceder a CNAR',
+      });
+    }
     if (centralStatus && centralStatus !== 404) {
-      const status = centralStatus === 403 ? 403 : 401;
-      return res.status(status).json({ ok: false, message: 'Credenciales inválidas' });
+      return res.status(401).json({ ok: false, message: 'Credenciales inválidas' });
     }
 
     if (centralStatus === 404 || authBackUnreachable) {
@@ -228,6 +235,19 @@ exports.login = async (req, res, next) => {
                 metadata:    { email: local.email, source: 'hub_direct' },
               });
               return sendLogin(req, res, local);
+            }
+          }
+        } else if (!hubUser) {
+          // La cuenta existe y la clave es correcta, pero no tiene rol CNAR.
+          const account = await findHubAccountByEmail(email);
+          if (account && account.password) {
+            const accountOk = await bcrypt.compare(password, account.password);
+            if (accountOk) {
+              return res.status(403).json({
+                ok: false,
+                error: 'ACCESS_DENIED',
+                message: 'No tienes permisos asignados para acceder a CNAR',
+              });
             }
           }
         }

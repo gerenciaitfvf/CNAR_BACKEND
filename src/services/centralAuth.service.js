@@ -35,4 +35,19 @@ async function findHubUserByEmail(email) {
   return rows.find((r) => norm(r.appName) === norm(appName)) || null;
 }
 
-module.exports = { loginCentral, findHubUserByEmail, APP_NAME };
+// Cuenta del hub (sin importar la app), solo para distinguir "sin rol en CNAR"
+// de "usuario inexistente". No emite sesión.
+async function findHubAccountByEmail(email) {
+  const [rows] = await pool.query(
+    `SELECT u.id AS userId, u.nombre AS userName, u.apellido AS userLastName,
+            u.email AS userEmail, su.nombre AS statusName, u.password AS password
+       FROM fvf_hub.usuarios u
+       JOIN fvf_hub.status_usuarios su ON u.status_id = su.id
+      WHERE u.email = ? AND su.nombre = 'ACTIVO'
+      LIMIT 1`,
+    [String(email || '').trim().toLowerCase()]
+  );
+  return rows[0] || null;
+}
+
+module.exports = { loginCentral, findHubUserByEmail, findHubAccountByEmail, APP_NAME };
